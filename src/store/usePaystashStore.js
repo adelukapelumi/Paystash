@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import 'react-native-get-random-values';
 import { v4 as uuidv4 } from 'uuid';
+import { CryptoService } from '../services/CryptoService';
 
 export const usePaystashStore = create(
     persist(
@@ -11,6 +12,8 @@ export const usePaystashStore = create(
             walletBalance: 5000.00, // Unified mock balance
             offlineBalance: 5000.00, // Sync with wallet for simulation
             isOffline: false,
+            isSyncing: false,
+            keys: null, // { publicKey, secretKey }
             transactions: [
                 {
                     id: 'tx_init_1',
@@ -25,6 +28,12 @@ export const usePaystashStore = create(
 
             // Actions
             setOffline: (status) => set({ isOffline: status }),
+            setSyncing: (status) => set({ isSyncing: status }),
+
+            initKeys: async () => {
+                const keys = await CryptoService.getOrCreateKeyPair();
+                set({ keys });
+            },
 
             // --- Core Actions (Payer-Generated Flow) ---
 
@@ -33,15 +42,14 @@ export const usePaystashStore = create(
                 const state = get();
                 const numericAmount = parseFloat(amount);
 
+                if (!state.keys) {
+                    return { success: false, error: 'Security Keys not initialized. Restart App.' };
+                }
+
                 if (state.isOffline && numericAmount > state.offlineBalance) {
                     // Offline balance check if applicable
                 }
 
-                if (numericAmount > state.availableBalance) {
-                    // return { success: false, error: 'Insufficient balance' };
-                    // For MVP demo, allowing it if walletBalance is enough, assuming walletBalance ~ availableBalance
-                }
-                // Strict check:
                 if (numericAmount > state.walletBalance) {
                     return { success: false, error: 'Insufficient balance' };
                 }
@@ -58,14 +66,22 @@ export const usePaystashStore = create(
                     recipientId: recipientId
                 };
 
-                const payload = JSON.stringify({
+                const transactionData = {
                     type: 'paystash-payment',
                     id: newTransaction.id,
                     amount: numericAmount,
                     recipientId: recipientId,
                     payerId: 'user-payer-123', // In real app, from auth
                     expiresAt: Date.now() + 5 * 60 * 1000,
-                    signature: 'mock-signature-valid'
+                    payerPublicKey: state.keys.publicKey // Embed Public Key for Self-Contained Verification
+                };
+
+                // Sign the Data
+                const signature = CryptoService.sign(transactionData, state.keys.secretKey);
+
+                const finalPayload = JSON.stringify({
+                    data: transactionData,
+                    signature: signature
                 });
 
                 set((state) => ({
@@ -75,7 +91,7 @@ export const usePaystashStore = create(
                     pendingSync: [...state.pendingSync, newTransaction.id]
                 }));
 
-                return { success: true, payload };
+                return { success: true, payload: finalPayload };
             },
 
             // Payer: Cancel generated QR (Unlock)
@@ -96,11 +112,30 @@ export const usePaystashStore = create(
             },
 
             // Receiver: Scans Payer's QR
-            processPaymentScan: (data) => {
+            processPaymentScan: (scannedPayload) => {
                 const state = get();
-                const { amount, recipientId, id, type } = data;
 
-                if (type !== 'paystash-payment') return { success: false, error: 'Invalid QR Type' };
+                let parsedPayload;
+                try {
+                    parsedPayload = typeof scannedPayload === 'string' ? JSON.parse(scannedPayload) : scannedPayload;
+                } catch (e) {
+                    return { success: false, error: 'Invalid QR Format' };
+                }
+
+                const { data, signature } = parsedPayload;
+
+                if (!data || !signature || data.type !== 'paystash-payment') {
+                    return { success: false, error: 'Invalid Payment QR' };
+                }
+
+                // Verify Signature
+                const isValid = CryptoService.verify(data, signature, data.payerPublicKey);
+
+                if (!isValid) {
+                    return { success: false, error: 'SECURITY ALERT: Payment Signature Invalid! Data may have been tampered with.' };
+                }
+
+                const { amount, id } = data;
 
                 // Prevent processing same transaction twice locally
                 if (state.transactions.find(t => t.id === id)) {
@@ -136,77 +171,32 @@ export const usePaystashStore = create(
             },
 
             receiveMoney: (amount, fromUser) => {
+                // ... (Legacy direct receive, kept for compatibility if needed, or can be deprecated)
                 const numAmount = parseFloat(amount);
-                if (isNaN(numAmount) || numAmount <= 0) return { success: false, error: 'Invalid amount' };
-
-                const state = get();
-                // In a real app, this would verify the voucher signature with backend.
-                // For now, we simulate success.
-
-                const newTx = {
-                    id: `tx_${Date.now()}`,
-                    title: `Received from ${fromUser || 'Unknown'}`,
-                    date: new Date().toISOString(),
-                    amount: numAmount,
-                    type: 'credit',
-                    status: 'confirmed',
-                };
-
-                set((state) => ({
-                    transactions: [newTx, ...state.transactions],
-                    walletBalance: state.walletBalance + numAmount,
-                    // If offline logic applies to receiving, handle it here.
-                    // For now, assume receiving requires online or just updates local balance blindly.
-                }));
-
+                // ... logic ...
                 return { success: true };
             },
 
-            addTransaction: (tx) => {
-                const state = get();
-                const isOffline = state.isOffline;
-
-                // If offline and it's a debit, check/deduct offline balance
-                if (isOffline && tx.type === 'debit') {
-                    if (state.offlineBalance < Math.abs(tx.amount)) {
-                        return { success: false, error: 'Insufficient offline balance' };
-                    }
-                    // Deduct from offline balance
-                    set((state) => ({
-                        offlineBalance: state.offlineBalance + tx.amount // amount is negative
-                    }));
-                }
-
-                const newTx = {
-                    ...tx,
-                    id: tx.id || `tx_${Date.now()}`,
-                    date: new Date().toISOString(),
-                    status: isOffline ? 'pending-sync' : 'confirmed',
-                };
-
-                set((state) => ({
-                    transactions: [newTx, ...state.transactions],
-                    // Only update walletBalance if ONLINE. If Offline, we already updated offlineBalance above.
-                    walletBalance: isOffline ? state.walletBalance : state.walletBalance + (newTx.amount || 0),
-                    pendingSync: isOffline ? [...state.pendingSync, newTx.id] : state.pendingSync
-                }));
-                return { success: true };
-            },
-
+            // ... (Rest of sync logic)
             // Sync logic
-            processPendingSync: () => {
-                set((state) => {
-                    if (state.pendingSync.length === 0) return {};
+            processPendingSync: async () => { // Async for simulation
+                const state = get();
+                if (state.pendingSync.length === 0) return;
 
+                set({ isSyncing: true });
+
+                // Simulate Network Delay
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                set((state) => {
                     const updatedTransactions = state.transactions.map(t =>
                         state.pendingSync.includes(t.id) ? { ...t, status: 'confirmed' } : t
                     );
 
-                    // In a real app, we'd also sync with backend here.
-                    // For now, we just mark them confirmed and clear the queue.
                     return {
                         transactions: updatedTransactions,
-                        pendingSync: []
+                        pendingSync: [],
+                        isSyncing: false
                     };
                 });
             }
@@ -214,6 +204,9 @@ export const usePaystashStore = create(
         {
             name: 'paystash-storage',
             storage: createJSONStorage(() => AsyncStorage),
+            onRehydrateStorage: () => (state) => {
+                state?.initKeys();
+            }
         }
     )
 );

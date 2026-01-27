@@ -70,8 +70,8 @@ const GenerateQRScreen = () => {
         if (result.success) {
             const payloadObj = JSON.parse(result.payload);
             setQrValue(result.payload);
-            setCurrentTxId(payloadObj.id);
-            setExpiresAt(payloadObj.expiresAt);
+            setCurrentTxId(payloadObj.data.id);
+            setExpiresAt(payloadObj.data.expiresAt);
         } else {
             Alert.alert('Error', result.error || 'Failed to generate QR');
         }
