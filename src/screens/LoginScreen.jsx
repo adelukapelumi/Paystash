@@ -42,6 +42,20 @@ const LoginScreen = () => {
         }
     };
 
+    const testNetwork = async () => {
+        try {
+            console.log('Testing Google...');
+            const google = await fetch('https://www.google.com', { method: 'HEAD' });
+            alert(`Google Reachable: ${google.status}`);
+
+            console.log('Testing Supabase...');
+            const sb = await fetch('https://snrqcbdsrvqsozagvlqx.supabase.co', { method: 'HEAD' });
+            alert(`Supabase Reachable: ${sb.status}`);
+        } catch (e) {
+            alert(`Network Test Failed: ${e.message}`);
+        }
+    };
+
     return (
         <ScreenWrapper>
             <Header showBack={true} title="Login" />
@@ -81,6 +95,7 @@ const LoginScreen = () => {
                             <Text style={styles.link}>Sign up</Text>
                         </TouchableOpacity>
                     </View>
+                    <Button title="Test Network Connection" onPress={testNetwork} variant="outline" style={{ marginTop: 20 }} />
                 </View>
             </View>
         </ScreenWrapper>
